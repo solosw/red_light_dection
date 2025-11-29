@@ -94,8 +94,11 @@ def check_dependencies():
     return True
 
 
-def run_detection():
-    """运行闯红灯检测"""
+def run_detection(realtime_display=False):
+    """运行闯红灯检测
+    Args:
+        realtime_display: 是否开启实时显示
+    """
     print("\n" + "=" * 60)
     print("开始闯红灯检测...")
     print("=" * 60)
@@ -104,12 +107,13 @@ def run_detection():
 
     # 输入输出文件
     input_video = "input.mp4"
-    output_video = "output_traffic_violation.mp4"
+    output_video = None if realtime_display else "output_traffic_violation.mp4"
 
     # 创建检测器
     detector = TrafficViolationDetector(
         yolo_model_path="yolov8s.pt",
         classifier_model_path="models/traffic_light_classifier.pth",
+        realtime_display=realtime_display,
     )
 
     # 处理视频
@@ -122,9 +126,6 @@ def run_detection():
 
         traceback.print_exc()
         return False
-
-
-
 
 
 def print_results_summary():
@@ -189,6 +190,11 @@ def main():
         "--skip-detection", action="store_true", help="跳过检测步骤（使用现有报告）"
     )
     parser.add_argument("--skip-viz", action="store_true", help="跳过可视化步骤")
+    parser.add_argument(
+        "--realtime",
+        action="store_true",
+        help="开启实时显示模式（显示检测窗口，可交互）",
+    )
     args = parser.parse_args()
 
     # 打印欢迎横幅
@@ -202,7 +208,7 @@ def main():
 
     # 运行检测
     if not args.skip_detection:
-        success = run_detection()
+        success = run_detection(realtime_display=args.realtime)
         if not success:
             print("\n❌ 检测失败")
             sys.exit(1)
@@ -211,7 +217,6 @@ def main():
 
     # 运行可视化
     if not args.skip_viz:
-
         if not success:
             print("\n❌ 可视化失败")
             sys.exit(1)

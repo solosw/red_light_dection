@@ -77,4 +77,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    model_path = "models/traffic_light_classifier.pth"
+    if not os.path.exists(model_path):
+        print(f"✗ 模型文件不存在: {model_path}")
+        print("请先运行训练: python train_classifier.py")

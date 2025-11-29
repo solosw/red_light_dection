@@ -1,5 +1,5 @@
 """
-闯红灯检测系统主脚本
+闯红灯检测系统主脚本 - 支持实时GUI显示
 整合YOLO检测、红绿灯分类、目标跟踪和违规判断
 """
 
@@ -15,6 +15,173 @@ from ultralytics import YOLO
 from infer_classifier import TrafficLightPredictor
 from tracker import SimpleTracker
 
+# GUI支持
+try:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    from PIL import Image, ImageTk
+
+    HAS_TKINTER = True
+except ImportError:
+    HAS_TKINTER = False
+
+
+class VideoDisplayWindow:
+    """视频显示窗口类"""
+
+    def __init__(self, title="闯红灯检测系统", width=1280, height=720):
+        if not HAS_TKINTER:
+            raise RuntimeError("tkinter 未安装，无法创建 GUI 窗口")
+
+        self.root = tk.Tk()
+        self.root.title(title)
+        self.root.geometry(f"{width}x{height}")
+        self.root.configure(bg="#2C2C2C")
+
+        # 创建视频显示区域
+        self.video_frame = tk.Frame(self.root, bg="#1C1C1C")
+        self.video_frame.pack(expand=True, fill="both", padx=10, pady=10)
+
+        self.video_label = tk.Label(self.video_frame, bg="#1C1C1C")
+        self.video_label.pack(expand=True)
+
+        # 创建控制面板
+        self.control_frame = tk.Frame(self.root, bg="#2C2C2C", height=100)
+        self.control_frame.pack(fill="x", padx=10, pady=5)
+        self.control_frame.pack_propagate(False)
+
+        # 控制按钮
+        self.pause_btn = tk.Button(
+            self.control_frame,
+            text="暂停",
+            command=self.toggle_pause,
+            bg="#4CAF50",
+            fg="white",
+            font=("Arial", 12),
+            width=10,
+        )
+        self.pause_btn.pack(side="left", padx=5, pady=5)
+
+        self.speed_btn = tk.Button(
+            self.control_frame,
+            text="速度: 1.0x",
+            command=self.change_speed,
+            bg="#2196F3",
+            fg="white",
+            font=("Arial", 12),
+            width=10,
+        )
+        self.speed_btn.pack(side="left", padx=5, pady=5)
+
+        self.screenshot_btn = tk.Button(
+            self.control_frame,
+            text="截图",
+            command=self.take_screenshot,
+            bg="#FF9800",
+            fg="white",
+            font=("Arial", 12),
+            width=10,
+        )
+        self.screenshot_btn.pack(side="left", padx=5, pady=5)
+
+        # 状态信息
+        self.status_frame = tk.Frame(self.root, bg="#2C2C2C", height=50)
+        self.status_frame.pack(fill="x", padx=10, pady=5)
+        self.status_frame.pack_propagate(False)
+
+        self.status_label = tk.Label(
+            self.status_frame,
+            text="就绪",
+            bg="#2C2C2C",
+            fg="white",
+            font=("Arial", 12),
+            anchor="w",
+        )
+        self.status_label.pack(fill="x", padx=5, pady=5)
+
+        # 状态变量
+        self.is_paused = False
+        self.speed = 1.0
+        self.current_frame = None
+        self.on_close = None
+
+        # 绑定关闭事件
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def toggle_pause(self):
+        """切换暂停/继续"""
+        self.is_paused = not self.is_paused
+        self.pause_btn.config(text="继续" if self.is_paused else "暂停")
+
+    def change_speed(self):
+        """调整播放速度"""
+        speeds = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+        idx = speeds.index(self.speed) if self.speed in speeds else 1
+        idx = (idx + 1) % len(speeds)
+        self.speed = speeds[idx]
+        self.speed_btn.config(text=f"速度: {self.speed}x")
+
+    def take_screenshot(self):
+        """截取当前帧"""
+        if self.current_frame is not None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            cv2.imwrite(f"screenshot_{timestamp}.jpg", self.current_frame)
+            self.update_status(f"截图已保存: screenshot_{timestamp}.jpg", "#4CAF50")
+
+    def update_frame(self, frame):
+        """更新显示帧"""
+        self.current_frame = frame.copy()
+
+        # 转换颜色空间 BGR -> RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # 调整大小
+        h, w = rgb_frame.shape[:2]
+        if h > 0 and w > 0:
+            # 计算缩放比例
+            display_w = min(self.root.winfo_width() - 40, w)
+            display_h = int(h * (display_w / w))
+            if display_h > self.root.winfo_height() - 200:
+                display_h = self.root.winfo_height() - 200
+                display_w = int(w * (display_h / h))
+
+            # 缩放图像
+            resized = cv2.resize(rgb_frame, (display_w, display_h))
+
+            # 转换为 PhotoImage
+            photo = ImageTk.PhotoImage(image=Image.fromarray(resized))
+
+            # 更新显示
+            self.video_label.config(image=photo, width=display_w, height=display_h)
+            self.video_label.image = photo  # 保持引用
+
+    def update_status(self, text, color="#FFFFFF"):
+        """更新状态信息"""
+        self.status_label.config(text=text, fg=color)
+
+    def on_closing(self):
+        """窗口关闭事件"""
+        if self.on_close:
+            self.on_close()
+        self.root.destroy()
+
+    def update(self):
+        """更新窗口"""
+        self.root.update()
+
+    def is_closed(self):
+        """检查窗口是否已关闭"""
+        return not self.root.winfo_exists()
+
+    def get_speed(self):
+        """获取当前播放速度"""
+        return self.speed
+
+    def is_paused(self):
+        """检查是否暂停"""
+        return self.is_paused
+
 
 class TrafficViolationDetector:
     """闯红灯检测系统"""
@@ -23,14 +190,19 @@ class TrafficViolationDetector:
         self,
         yolo_model_path="yolov8s.pt",
         classifier_model_path="models/traffic_light_classifier.pth",
-        stop_line_y=None,
+        detection_zone=None,
+        realtime_display=True,
+        window_name="闯红灯检测系统 - 实时监控",
     ):
         """
         初始化检测系统
         Args:
             yolo_model_path: YOLO模型路径
             classifier_model_path: 红绿灯分类模型路径
-            stop_line_y: 停止线Y坐标（None则自动设置）
+            detection_zone: 检测区域 (x1, y1, x2, y2)，只有在此区域内的行人才会被判定为闯红灯
+                          None则自动设置为画面中心区域
+            realtime_display: 是否开启实时显示
+            window_name: 实时显示窗口名称
         """
         # 加载YOLO模型
         self.yolo_model = YOLO(yolo_model_path)
@@ -49,9 +221,7 @@ class TrafficViolationDetector:
         print("✓ 跟踪器初始化完成")
 
         # 检测区域配置
-        self.stop_line_y = stop_line_y
-        self.violation_cooldown = {}  # 违规冷却期：防止重复记录
-        self.cooldown_frames = 60  # 60帧冷却期
+        self.detection_zone = detection_zone  # 检测区域 (x1, y1, x2, y2)
 
         # 统计信息
         self.stats = {
@@ -67,12 +237,68 @@ class TrafficViolationDetector:
         # 违规记录
         self.violations = []
 
-    def set_stop_line(self, frame_height):
-        """设置停止线（基于视频高度自动设置）"""
-        if self.stop_line_y is None:
-            # 在视频下方20%处设置停止线
-            self.stop_line_y = int(frame_height * 0.8)
-        print(f"✓ 停止线设置: Y = {self.stop_line_y}")
+        # 实时显示配置
+        self.realtime_display = realtime_display
+        self.window_name = window_name
+        self.paused = False
+        self.speed_factor = 1.0  # 播放速度倍数 (1.0=正常速度, 2.0=2倍速, 0.5=0.5倍速)
+
+        # 初始化显示窗口
+        self.gui_window = None
+        self.window_available = False
+        if self.realtime_display:
+            if HAS_TKINTER:
+                try:
+                    self.gui_window = VideoDisplayWindow(title=window_name)
+                    self.gui_window.on_close = self.on_window_close
+                    print(f"✓ GUI窗口已创建: {window_name}")
+                    self.window_available = True
+                except Exception as e:
+                    print(f"⚠️ 无法创建GUI窗口: {e}")
+                    self.window_available = False
+            else:
+                print("⚠️ tkinter 未安装，无法创建 GUI 窗口")
+                self.window_available = False
+
+        if not self.window_available:
+            print("⚠️ 将自动切换到非实时模式 (仅处理数据，不显示视频)")
+
+    def on_window_close(self):
+        """窗口关闭回调"""
+        self.window_available = False
+        print("\n⚠️ GUI窗口已关闭，检测将继续在后台运行...")
+
+    def set_detection_zone(self, frame_width, frame_height):
+        """设置检测区域（基于视频尺寸自动设置）"""
+        if self.detection_zone is None:
+            # 默认设置为画面中心区域（宽度40%-60%，高度50%-90%）
+            x1 = int(frame_width * 0.3)
+            y1 = int(frame_height * 0.4)
+            x2 = int(frame_width * 0.7)
+            y2 = int(frame_height * 0.9)
+            self.detection_zone = (x1, y1, x2, y2)
+        print(
+            f"✓ 检测区域设置: ({self.detection_zone[0]}, {self.detection_zone[1]}) -> ({self.detection_zone[2]}, {self.detection_zone[3]})"
+        )
+
+    def is_in_detection_zone(self, bbox):
+        """
+        判断目标是否在检测区域内
+        Args:
+            bbox: 目标边界框 (x1, y1, x2, y2)
+        Returns:
+            bool: 如果目标中心点在检测区域内返回True，否则返回False
+        """
+        if self.detection_zone is None:
+            return True  # 如果没有设置检测区域，默认所有目标都在区域内
+
+        # 计算目标中心点
+        center_x = (bbox[0] + bbox[2]) / 2
+        center_y = (bbox[1] + bbox[3]) / 2
+
+        # 检查中心点是否在检测区域内
+        zone_x1, zone_y1, zone_x2, zone_y2 = self.detection_zone
+        return (zone_x1 <= center_x <= zone_x2) and (zone_y1 <= center_y <= zone_y2)
 
     def detect_traffic_lights(self, frame):
         """检测红绿灯并进行分类"""
@@ -170,26 +396,58 @@ class TrafficViolationDetector:
         if current_light_color != "red":
             return violations_found
 
-        # 检查每个车辆是否越线
+        # 检查每个行人是否在红灯下移动
         for obj_id, vehicle in self.tracker.objects.items():
-            # 跳过非车辆目标
-            if vehicle["class"] not in ["car", "truck", "bus", "motorcycle", "bicycle"]:
+            # 只检查行人（人行红灯违规）
+            if vehicle["class"] != "person":
                 continue
 
-            bbox = vehicle["bbox"]
-            vehicle_bottom_y = bbox[3]  # 车辆底部Y坐标
+            # 只要是行人在红灯下就算违规（不需要越过停止线）
+            # 检查是否已经记录为违规（第一次检测到红灯时记录）
+            already_violated = False
+            for v in self.violations:
+                if v["object_id"] == obj_id:
+                    already_violated = True
+                    break
 
-            # 检查是否越过停止线（车辆底部越过停止线）
-            crossed_line = vehicle_bottom_y > self.stop_line_y
+            # 如果是红灯且还没有记录为违规，则记录
+            if current_light_color == "red" and not already_violated:
+                # 检查是否在移动（需要至少2帧的轨迹数据）
+                trajectory = vehicle.get("trajectory", [])
+                is_moving = False
 
-            # 检查是否在冷却期内
-            if obj_id in self.violation_cooldown:
-                if self.violation_cooldown[obj_id] > 0:
-                    self.violation_cooldown[obj_id] -= 1
+                if len(trajectory) >= 2:
+                    # 计算最近两帧的中心点移动距离
+                    prev_bbox = trajectory[-2]
+                    curr_bbox = trajectory[-1]
+
+                    # 计算中心点
+                    prev_center_x = (prev_bbox[0] + prev_bbox[2]) / 2
+                    prev_center_y = (prev_bbox[1] + prev_bbox[3]) / 2
+                    curr_center_x = (curr_bbox[0] + curr_bbox[2]) / 2
+                    curr_center_y = (curr_bbox[1] + curr_bbox[3]) / 2
+
+                    # 计算欧几里得距离
+                    movement_distance = (
+                        (curr_center_x - prev_center_x) ** 2
+                        + (curr_center_y - prev_center_y) ** 2
+                    ) ** 0.5
+
+                    # 如果移动距离超过阈值（5像素），认为是移动
+                    if movement_distance > 5.0:
+                        is_moving = True
+
+                # 只有在移动时才记录违规
+                if not is_moving:
                     continue
 
-            # 如果越线且不在冷却期，则记录违规
-            if crossed_line and self.violation_cooldown.get(obj_id, 0) == 0:
+                # 获取行人bbox
+                bbox = vehicle["bbox"]
+
+                # 检查行人是否在检测区域内，只有在区域内才算违规
+                if not self.is_in_detection_zone(bbox):
+                    continue
+
                 # 获取红绿灯位置（用于绘制违规指示）
                 traffic_light_bbox = None
                 if traffic_lights:
@@ -209,7 +467,6 @@ class TrafficViolationDetector:
                 }
 
                 violations_found.append(violation)
-                self.violation_cooldown[obj_id] = self.cooldown_frames
 
         return violations_found
 
@@ -217,19 +474,26 @@ class TrafficViolationDetector:
         """绘制UI界面"""
         height, width = frame.shape[:2]
 
-        # 绘制停止线
-        cv2.line(
-            frame, (0, self.stop_line_y), (width, self.stop_line_y), (0, 0, 255), 3
-        )
-        cv2.putText(
-            frame,
-            "STOP LINE",
-            (10, self.stop_line_y - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 255),
-            2,
-        )
+        # 绘制检测区域
+        if self.detection_zone is not None:
+            zone_x1, zone_y1, zone_x2, zone_y2 = self.detection_zone
+            # 绘制半透明的检测区域
+            overlay = frame.copy()
+            cv2.rectangle(
+                overlay, (zone_x1, zone_y1), (zone_x2, zone_y2), (0, 255, 0), -1
+            )
+            cv2.addWeighted(overlay, 0.1, frame, 0.9, 0, frame)
+            # 绘制边框
+            cv2.rectangle(frame, (zone_x1, zone_y1), (zone_x2, zone_y2), (0, 255, 0), 3)
+            cv2.putText(
+                frame,
+                "DETECTION ZONE",
+                (zone_x1 + 10, zone_y1 + 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 0),
+                2,
+            )
 
         # 绘制交通灯状态
         if traffic_lights:
@@ -286,14 +550,20 @@ class TrafficViolationDetector:
 
     def draw_stats(self, frame):
         """绘制统计信息"""
-        stats_text = [
+        # 添加实时显示状态信息
+        display_text = [
             f"Frame: {self.stats['total_frames']}",
             f"Violations: {self.stats['total_violations']}",
             f"Vehicles: {self.stats['detected_vehicles']}",
             f"TL Detected: {self.stats['detected_traffic_lights']}",
         ]
 
-        for i, text in enumerate(stats_text):
+        if self.window_available:
+            status = "PAUSED" if self.gui_window.is_paused else "RUNNING"
+            speed_text = f"{self.speed_factor:.1f}x"
+            display_text.insert(0, f"Status: {status} | Speed: {speed_text}")
+
+        for i, text in enumerate(display_text):
             cv2.putText(
                 frame,
                 text,
@@ -327,8 +597,8 @@ class TrafficViolationDetector:
         print(f"  帧率: {fps} FPS")
         print(f"  总帧数: {total_frames}")
 
-        # 设置停止线
-        self.set_stop_line(height)
+        # 设置检测区域
+        self.set_detection_zone(width, height)
 
         # 创建输出视频写入器
         output_writer = None
@@ -337,75 +607,147 @@ class TrafficViolationDetector:
             output_writer = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
             print(f"  输出视频: {output_video}")
 
+        # 实时显示提示
+        if self.window_available:
+            print(f"\n" + "=" * 80)
+            print("实时监控模式已开启!")
+            print("=" * 80)
+            print("GUI控制:")
+            print("  点击[暂停/继续]按钮: 暂停/继续播放")
+            print("  点击[速度]按钮: 调整播放速度")
+            print("  点击[截图]按钮: 保存当前帧")
+            print("  关闭窗口: 退出程序")
+            print("=" * 80)
+            self.gui_window.update_status("正在初始化...", "#2196F3")
+        elif self.realtime_display:
+            print(f"\n" + "=" * 80)
+            print("⚠️ 实时监控模式提示:")
+            print("=" * 80)
+            print("检测将在后台运行，生成报告和输出视频")
+            print("=" * 80)
+
         # 开始处理
         print(f"\n开始处理视频...")
-        print("进度: ", end="", flush=True)
+        if not self.window_available and not self.realtime_display:
+            print("进度: ", end="", flush=True)
 
         frame_count = 0
         start_time = time.time()
 
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-            # 每10%进度显示一次
-            if frame_count % (total_frames // 10) == 0:
-                progress = (frame_count / total_frames) * 100
-                print(f"{progress:.0f}% ", end="", flush=True)
+                # GUI模式：检查窗口状态
+                if self.window_available:
+                    self.gui_window.update()
+                    if self.gui_window.is_closed():
+                        print("\n⚠️ 用户关闭了窗口")
+                        break
 
-            self.stats["total_frames"] = frame_count
+                    # 如果暂停，只更新GUI状态，不处理新帧
+                    if self.gui_window.is_paused:
+                        # 更新状态显示
+                        status = f"帧: {frame_count} | 违规: {self.stats['total_violations']}"
+                        self.gui_window.update_status(status, "#FFA500")
+                        time.sleep(0.03)
+                        continue
 
-            # 检测红绿灯
-            traffic_lights = self.detect_traffic_lights(frame)
-            self.stats["detected_traffic_lights"] += len(traffic_lights)
+                    # 更新播放速度
+                    self.speed_factor = self.gui_window.get_speed()
 
-            # 检测车辆
-            vehicles = self.detect_vehicles(frame)
-            self.stats["detected_vehicles"] += len(vehicles)
+                self.stats["total_frames"] = frame_count
 
-            # 转换检测结果为跟踪器格式
-            detections = vehicles
+                # 非实时模式显示进度
+                if not self.window_available and not self.realtime_display:
+                    if frame_count % (total_frames // 10) == 0:
+                        progress = (frame_count / total_frames) * 100
+                        print(f"{progress:.0f}% ", end="", flush=True)
 
-            # 更新跟踪器
-            tracks = self.tracker.update(detections)
+                # 检测红绿灯
+                traffic_lights = self.detect_traffic_lights(frame)
+                self.stats["detected_traffic_lights"] += len(traffic_lights)
 
-            # 检查违规
-            violations = self.check_violations(vehicles, traffic_lights)
+                # 检测车辆
+                vehicles = self.detect_vehicles(frame)
+                self.stats["detected_vehicles"] += len(vehicles)
 
-            # 记录违规
-            for violation in violations:
-                self.violations.append(violation)
-                self.stats["total_violations"] += 1
-                print(
-                    f"\n⚠️  闯红灯违规! ID: {violation['object_id']}, 车型: {violation['vehicle_class']}"
-                )
+                # 转换检测结果为跟踪器格式
+                detections = vehicles
 
-            # 绘制跟踪轨迹
-            frame = self.tracker.draw_tracks(frame)
+                # 更新跟踪器
+                tracks = self.tracker.update(detections)
 
-            # 绘制UI
-            frame = self.draw_ui(frame, vehicles, traffic_lights, violations)
+                # 检查违规
+                violations = self.check_violations(vehicles, traffic_lights)
 
-            # 写入输出视频
+                # 记录违规
+                for violation in violations:
+                    self.violations.append(violation)
+                    self.stats["total_violations"] += 1
+                    print(
+                        f"\n⚠️  闯红灯违规! ID: {violation['object_id']}, 车型: {violation['vehicle_class']}"
+                    )
+
+                # 绘制跟踪轨迹（持续标注所有违规对象）
+                # 获取所有曾经违规的对象ID
+                all_violation_ids = [v["object_id"] for v in self.violations]
+                # 也包括当前帧新检测到的违规
+                current_violation_ids = [v["object_id"] for v in violations]
+                all_violation_ids.extend(current_violation_ids)
+
+                # 绘制所有违规对象
+                frame = self.tracker.draw_tracks(frame, violation_ids=all_violation_ids)
+
+                # 绘制UI
+                frame = self.draw_ui(frame, vehicles, traffic_lights, violations)
+
+                # GUI实时显示
+                if self.window_available:
+                    self.gui_window.update_frame(frame)
+                    status = f"帧: {frame_count} | 车辆: {len(vehicles)} | 违规: {self.stats['total_violations']}"
+                    self.gui_window.update_status(status, "#4CAF50")
+                else:
+                    # 非实时模式或后台模式
+                    # 写入输出视频
+                    if output_writer:
+                        output_writer.write(frame)
+
+                # 控制播放速度（GUI模式）
+                if self.window_available and self.speed_factor > 1.0:
+                    # 加速播放时跳过一些帧
+                    skip_frames = int(self.speed_factor) - 1
+                    for _ in range(skip_frames):
+                        cap.grab()
+
+                frame_count += 1
+
+        except KeyboardInterrupt:
+            print("\n⚠️ 检测到键盘中断")
+
+        finally:
+            # 释放资源
+            cap.release()
             if output_writer:
-                output_writer.write(frame)
+                output_writer.release()
 
-            frame_count += 1
+            # 关闭GUI窗口
+            if self.window_available and self.gui_window:
+                self.gui_window.root.destroy()
 
-        # 释放资源
-        cap.release()
-        if output_writer:
-            output_writer.release()
+            elapsed_time = time.time() - start_time
 
-        elapsed_time = time.time() - start_time
-        print("100%")
-        print(f"\n✓ 视频处理完成!")
-        print(f"  处理时间: {elapsed_time:.2f} 秒")
-        print(f"  平均FPS: {frame_count / elapsed_time:.2f}")
+            if not self.window_available and not self.realtime_display:
+                print("100%")
 
-        # 保存报告
-        #self.save_report(input_video, output_video, elapsed_time)
+            print(f"\n✓ 视频处理完成!")
+            print(f"  处理时间: {elapsed_time:.2f} 秒")
+            print(f"  平均FPS: {frame_count / elapsed_time:.2f}")
+
+            # 保存报告
+            self.save_report(input_video, output_video, elapsed_time)
 
     def save_report(self, input_video, output_video, elapsed_time):
         """保存检测报告"""

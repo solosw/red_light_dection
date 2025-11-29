@@ -209,32 +209,83 @@ class SimpleTracker:
 
         return intersection / union
 
-    def draw_tracks(self, frame):
-        """在帧上绘制跟踪轨迹和ID"""
+    def draw_tracks(self, frame, violation_ids=None):
+        """在帧上绘制跟踪轨迹和ID（只标注闯红灯违规对象）
+
+        Args:
+            frame: 输入帧
+            violation_ids: 违规对象ID列表，如果为None则绘制所有对象
+        """
+        # 如果指定了违规ID列表，只绘制这些对象
+        if violation_ids is not None:
+            object_ids_to_draw = violation_ids
+        else:
+            object_ids_to_draw = self.objects.keys()
+
         for object_id, track_info in self.objects.items():
+            # 跳过非违规对象
+            if violation_ids is not None and object_id not in violation_ids:
+                continue
+
             bbox = track_info["bbox"]
             class_name = track_info["class"]
             trajectory = track_info["trajectory"]
 
-            # 绘制轨迹
-            if len(trajectory) > 1:
-                points = [
-                    (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
-                    for bbox in trajectory[-10:]
-                ]
-                for i in range(1, len(points)):
-                    cv2.line(frame, points[i - 1], points[i], (255, 255, 0), 2)
+            # 绘制轨迹（只对违规对象）
+            if violation_ids is not None and object_id in violation_ids:
+                if len(trajectory) > 1:
+                    points = [
+                        (int((bbox[0] + bbox[2]) / 2), int((bbox[1] + bbox[3]) / 2))
+                        for bbox in trajectory[-10:]
+                    ]
+                    for i in range(1, len(points)):
+                        cv2.line(frame, points[i - 1], points[i], (255, 100, 100), 2)
 
             # 绘制bbox
             x1, y1, x2, y2 = map(int, bbox)
-            color = self._get_color(class_name)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+            # 如果是违规对象，使用红色边框
+            if violation_ids is not None and object_id in violation_ids:
+                color = (0, 0, 255)  # 红色边框
+                thickness = 3  # 更粗的边框
+            else:
+                color = self._get_color(class_name)
+                thickness = 2
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
 
             # 绘制ID和类别
-            label = f"ID:{object_id} {class_name}"
-            cv2.putText(
-                frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2
+            label = f"ID:{object_id}"
+            if violation_ids is not None and object_id in violation_ids:
+                label += " VIOLATION!"
+
+            # 为违规对象添加醒目的文字
+            text_color = (
+                (0, 0, 255)
+                if (violation_ids is not None and object_id in violation_ids)
+                else color
             )
+
+            # 计算文字位置
+            text_y = y1 - 10 if (y1 - 10) > 0 else y1 + 20
+            cv2.putText(
+                frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2
+            )
+
+            # 为违规对象添加额外的警告标识
+            if violation_ids is not None and object_id in violation_ids:
+                # 在违规对象上方画一个红色感叹号
+                warning_text = "!!!"
+                warning_y = y1 - 40 if y1 - 40 > 10 else y1 - 10
+                cv2.putText(
+                    frame,
+                    warning_text,
+                    (x2 - 30, warning_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 0, 255),
+                    3,
+                )
 
         return frame
 

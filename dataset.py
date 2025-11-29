@@ -81,7 +81,7 @@ def get_data_loaders(train_dir, test_dir, batch_size=32, num_workers=2):
 
 def get_class_names():
     """获取类别名称"""
-    return ["green", "red", "yellow"]
+    return ["red","green", "yellow"]
 
 
 if __name__ == "__main__":
