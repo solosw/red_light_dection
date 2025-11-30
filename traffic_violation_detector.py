@@ -12,8 +12,9 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+from detection_zone import DetectionZone, ZoneManager, interactive_zone_selection
 from infer_classifier import TrafficLightPredictor
-from tracker import SimpleTracker
+from sort.SimpleSort import Sort
 
 # GUI支持
 try:
@@ -191,6 +192,7 @@ class TrafficViolationDetector:
         yolo_model_path="yolov8s.pt",
         classifier_model_path="models/traffic_light_classifier.pth",
         detection_zone=None,
+        polygon_points=None,
         realtime_display=True,
         window_name="闯红灯检测系统 - 实时监控",
     ):
@@ -200,7 +202,7 @@ class TrafficViolationDetector:
             yolo_model_path: YOLO模型路径
             classifier_model_path: 红绿灯分类模型路径
             detection_zone: 检测区域 (x1, y1, x2, y2)，只有在此区域内的行人才会被判定为闯红灯
-                          None则自动设置为画面中心区域
+            polygon_points: 4个点坐标列表 [x1, y1, x2, y2, x3, y3, x4, y4]
             realtime_display: 是否开启实时显示
             window_name: 实时显示窗口名称
         """
@@ -216,12 +218,41 @@ class TrafficViolationDetector:
             print(f"⚠ 红绿灯分类模型不存在: {classifier_model_path}")
             self.traffic_light_predictor = None
 
-        # 初始化跟踪器
-        self.tracker = SimpleTracker(max_disappeared=30, min_iou=0.3)
-        print("✓ 跟踪器初始化完成")
+        # 初始化 Sort 跟踪器
+        # 参数: max_age=最大无更新帧数, min_hits=最小命中次数, iou_threshold=IoU阈值
+        self.tracker = Sort(max_age=30, min_hits=3, iou_threshold=0.3)
+        print("✓ Sort 跟踪器初始化完成")
 
-        # 检测区域配置
-        self.detection_zone = detection_zone  # 检测区域 (x1, y1, x2, y2)
+        # 初始化区域管理器
+        self.zone_manager = ZoneManager()
+
+        # 支持多种区域类型
+        self.detection_zones: List[DetectionZone] = []
+
+        # 优先使用多边形区域（4个点）
+        if polygon_points is not None and len(polygon_points) == 8:
+            from detection_zone import PolygonZone
+
+            polygon_zone = PolygonZone("custom_polygon")
+            # 解析8个坐标为4个点
+            points = [
+                (polygon_points[i], polygon_points[i + 1]) for i in range(0, 8, 2)
+            ]
+            polygon_zone.points = points
+            self.detection_zones.append(polygon_zone)
+            print(f"✓ 加载4点定义的多边形检测区域")
+            print(f"  4个点坐标: {points}")
+        # 兼容旧的检测区域格式 (x1, y1, x2, y2)
+        elif detection_zone is not None:
+            from detection_zone import RectZone
+
+            rect_zone = RectZone("default")
+            x1, y1, x2, y2 = detection_zone
+            rect_zone.set_rect(x1, y1, x2, y2)
+            self.detection_zones.append(rect_zone)
+            print(f"✓ 加载检测区域: {detection_zone}")
+        else:
+            print("✓ 未设置检测区域，将启动交互式选择")
 
         # 统计信息
         self.stats = {
@@ -270,35 +301,45 @@ class TrafficViolationDetector:
 
     def set_detection_zone(self, frame_width, frame_height):
         """设置检测区域（基于视频尺寸自动设置）"""
-        if self.detection_zone is None:
+        if not self.detection_zones:
             # 默认设置为画面中心区域（宽度40%-60%，高度50%-90%）
+            from detection_zone import RectZone
+
+            rect_zone = RectZone("default")
             x1 = int(frame_width * 0.3)
             y1 = int(frame_height * 0.4)
             x2 = int(frame_width * 0.7)
             y2 = int(frame_height * 0.9)
+            rect_zone.set_rect(x1, y1, x2, y2)
+            self.detection_zones.append(rect_zone)
+
+            # 保留向后兼容
             self.detection_zone = (x1, y1, x2, y2)
-        print(
-            f"✓ 检测区域设置: ({self.detection_zone[0]}, {self.detection_zone[1]}) -> ({self.detection_zone[2]}, {self.detection_zone[3]})"
-        )
+
+        print(f"✓ 检测区域已设置，共 {len(self.detection_zones)} 个区域")
+        for i, zone in enumerate(self.detection_zones):
+            print(f"  区域 {i + 1}: {zone.name} ({zone.__class__.__name__})")
 
     def is_in_detection_zone(self, bbox):
         """
-        判断目标是否在检测区域内
+        判断目标是否在检测区域内（支持多个区域）
         Args:
             bbox: 目标边界框 (x1, y1, x2, y2)
         Returns:
-            bool: 如果目标中心点在检测区域内返回True，否则返回False
+            bool: 如果目标中心点在任意检测区域内返回True，否则返回False
         """
-        if self.detection_zone is None:
+        if not self.detection_zones:
             return True  # 如果没有设置检测区域，默认所有目标都在区域内
 
         # 计算目标中心点
         center_x = (bbox[0] + bbox[2]) / 2
         center_y = (bbox[1] + bbox[3]) / 2
 
-        # 检查中心点是否在检测区域内
-        zone_x1, zone_y1, zone_x2, zone_y2 = self.detection_zone
-        return (zone_x1 <= center_x <= zone_x2) and (zone_y1 <= center_y <= zone_y2)
+        # 检查中心点是否在任意检测区域内
+        for zone in self.detection_zones:
+            if zone.is_point_inside(int(center_x), int(center_y)):
+                return True
+        return False
 
     def detect_traffic_lights(self, frame):
         """检测红绿灯并进行分类"""
@@ -370,6 +411,29 @@ class TrafficViolationDetector:
                     )
 
         return vehicles
+
+    def select_detection_zone_interactive(self, video_path):
+        """交互式选择检测区域
+
+        Args:
+            video_path: 视频文件路径
+        Returns:
+            DetectionZone: 选中的区域对象或 None
+        """
+        print("\n" + "=" * 80)
+        print("🎯 交互式检测区域选择")
+        print("=" * 80)
+
+        # 使用新的区域选择系统
+        zone = interactive_zone_selection(video_path, zone_type="rect")
+
+        if zone:
+            print(f"\n✓ 区域选择成功！")
+            return zone
+        else:
+            print(f"\n⚠️ 区域选择失败或被取消")
+            print("将使用默认区域")
+            return None
 
     def check_violations(self, vehicles, traffic_lights):
         """检查闯红灯违规"""
@@ -470,30 +534,170 @@ class TrafficViolationDetector:
 
         return violations_found
 
+    def check_violations_with_sort(self, tracks_dict, traffic_lights):
+        """检查闯红灯违规（适配 Sort 跟踪器）"""
+        violations_found = []
+
+        # 获取当前交通灯状态
+        current_light_color = "unknown"
+        max_confidence = 0.0
+
+        for tl in traffic_lights:
+            if tl["confidence"] > max_confidence:
+                current_light_color = tl["color"]
+                max_confidence = tl["confidence"]
+
+        # 更新统计信息
+        if current_light_color == "red":
+            self.stats["red_light_frames"] += 1
+        elif current_light_color == "green":
+            self.stats["green_light_frames"] += 1
+        elif current_light_color == "yellow":
+            self.stats["yellow_light_frames"] += 1
+
+        # 只有在红灯时才检查违规
+        if current_light_color != "red":
+            return violations_found
+
+        # 检查每个行人是否在红灯下移动
+        for obj_id, vehicle in tracks_dict.items():
+            # 只检查行人（人行红灯违规）
+            if vehicle["class"] != "person":
+                continue
+
+            # 检查是否已经记录为违规
+            already_violated = False
+            for v in self.violations:
+                if v["object_id"] == obj_id:
+                    already_violated = True
+                    break
+
+            # 如果是红灯且还没有记录为违规，则记录
+            if current_light_color == "red" and not already_violated:
+                # 简化处理：只要检测到行人在红灯下就记录违规
+                # 检查行人是否在检测区域内
+                bbox = vehicle["bbox"]
+                if not self.is_in_detection_zone(bbox):
+                    continue
+
+                # 获取红绿灯位置（用于绘制违规指示）
+                traffic_light_bbox = None
+                if traffic_lights:
+                    traffic_light_bbox = max(
+                        traffic_lights, key=lambda x: x["confidence"]
+                    )["bbox"]
+
+                violation = {
+                    "object_id": obj_id,
+                    "vehicle_class": vehicle["class"],
+                    "timestamp": time.time(),
+                    "frame": self.stats["total_frames"],
+                    "vehicle_bbox": bbox.copy(),
+                    "traffic_light_bbox": traffic_light_bbox,
+                    "light_color": current_light_color,
+                }
+
+                violations_found.append(violation)
+
+        return violations_found
+
+    def draw_tracks_with_sort(
+        self, frame, tracked_objects, violation_ids, vehicles=None
+    ):
+        """绘制跟踪结果（适配 Sort 跟踪器）
+
+        Args:
+            frame: 输入帧
+            tracked_objects: Sort 跟踪器输出的数组 [[x1, y1, x2, y2, track_id], ...]
+            violation_ids: 违规对象ID列表
+            vehicles: 车辆检测结果列表（用于获取类别信息）
+        """
+        if len(tracked_objects) == 0:
+            return frame
+
+        for track in tracked_objects:
+            x1, y1, x2, y2, track_id = track
+            track_id = int(track_id)
+
+            # 绘制bbox
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+            # 根据是否是违规对象选择颜色
+            if track_id in violation_ids:
+                color = (0, 0, 255)  # 红色 - 违规对象
+                thickness = 3
+            else:
+                color = (0, 255, 0)  # 绿色 - 正常跟踪对象
+                thickness = 2
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+
+            # 绘制ID和类别标签
+            # 先尝试从 vehicles 中获取类别信息
+            class_name = "unknown"
+            if vehicles:
+                for vehicle in vehicles:
+                    bbox = vehicle["bbox"]
+                    if (
+                        abs(bbox[0] - x1) < 10
+                        and abs(bbox[1] - y1) < 10
+                        and abs(bbox[2] - x2) < 10
+                        and abs(bbox[3] - y2) < 10
+                    ):
+                        class_name = vehicle["class"]
+                        break
+
+            label = f"ID:{track_id}"
+            if track_id in violation_ids:
+                label += " VIOLATION!"
+
+            # 绘制文本
+            text_color = (0, 0, 255) if track_id in violation_ids else (0, 255, 0)
+            text_y = y1 - 10 if (y1 - 10) > 0 else y1 + 20
+            cv2.putText(
+                frame, label, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, text_color, 2
+            )
+
+            # 为违规对象添加额外标识
+            if track_id in violation_ids:
+                warning_text = "!!!"
+                warning_y = y1 - 40 if y1 - 40 > 10 else y1 - 10
+                cv2.putText(
+                    frame,
+                    warning_text,
+                    (x2 - 30, warning_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 0, 255),
+                    3,
+                )
+
+        return frame
+
     def draw_ui(self, frame, vehicles, traffic_lights, violations):
         """绘制UI界面"""
         height, width = frame.shape[:2]
 
-        # 绘制检测区域
-        if self.detection_zone is not None:
-            zone_x1, zone_y1, zone_x2, zone_y2 = self.detection_zone
-            # 绘制半透明的检测区域
-            overlay = frame.copy()
-            cv2.rectangle(
-                overlay, (zone_x1, zone_y1), (zone_x2, zone_y2), (0, 255, 0), -1
-            )
-            cv2.addWeighted(overlay, 0.1, frame, 0.9, 0, frame)
-            # 绘制边框
-            cv2.rectangle(frame, (zone_x1, zone_y1), (zone_x2, zone_y2), (0, 255, 0), 3)
-            cv2.putText(
-                frame,
-                "DETECTION ZONE",
-                (zone_x1 + 10, zone_y1 + 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 0),
-                2,
-            )
+        # 绘制检测区域（支持多种形状）
+        if self.detection_zones:
+            for i, zone in enumerate(self.detection_zones):
+                # 绘制区域
+                frame = zone.draw(
+                    frame, color=(0, 255, 0), thickness=2, fill_alpha=0.15
+                )
+
+                # 添加区域编号
+                if zone.points:
+                    x, y = zone.points[0]
+                    cv2.putText(
+                        frame,
+                        f"Zone {i + 1}: {zone.name}",
+                        (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (255, 255, 255),
+                        1,
+                    )
 
         # 绘制交通灯状态
         if traffic_lights:
@@ -597,8 +801,21 @@ class TrafficViolationDetector:
         print(f"  帧率: {fps} FPS")
         print(f"  总帧数: {total_frames}")
 
-        # 设置检测区域
-        self.set_detection_zone(width, height)
+        # 检查并设置检测区域
+        if not self.detection_zones:
+            print("\n检测区域未设置，将启动交互式选择...")
+            selected_zone = self.select_detection_zone_interactive(input_video)
+            if selected_zone:
+                self.detection_zones.append(selected_zone)
+                print(f"\n✓ 使用交互式选择的检测区域")
+                print(f"  类型: {selected_zone.__class__.__name__}")
+                print(f"  名称: {selected_zone.name}")
+            else:
+                print("\n⚠️ 区域选择被取消或失败，使用默认区域")
+                self.set_detection_zone(width, height)
+        else:
+            # 已设置检测区域
+            self.set_detection_zone(width, height)
 
         # 创建输出视频写入器
         output_writer = None
@@ -674,14 +891,65 @@ class TrafficViolationDetector:
                 vehicles = self.detect_vehicles(frame)
                 self.stats["detected_vehicles"] += len(vehicles)
 
-                # 转换检测结果为跟踪器格式
-                detections = vehicles
+                # 转换检测结果为 Sort 格式 [x1, y1, x2, y2, score]
+                if len(vehicles) > 0:
+                    dets = np.array(
+                        [
+                            [
+                                v["bbox"][0],
+                                v["bbox"][1],
+                                v["bbox"][2],
+                                v["bbox"][3],
+                                v["confidence"],
+                            ]
+                            for v in vehicles
+                        ]
+                    )
+                else:
+                    dets = np.empty((0, 5))
 
-                # 更新跟踪器
-                tracks = self.tracker.update(detections)
+                # 更新 Sort 跟踪器
+                tracked_objects = self.tracker.update(dets)
+                # tracked_objects: [[x1, y1, x2, y2, track_id], ...]
+
+                # 构建跟踪结果的字典格式，便于后续处理
+                tracks_dict = {}
+                if len(tracked_objects) > 0:
+                    for track in tracked_objects:
+                        x1, y1, x2, y2, track_id = track
+                        track_id = int(track_id)
+
+                        # 找到对应的车辆信息
+                        vehicle_info = None
+                        for v in vehicles:
+                            bbox = v["bbox"]
+                            # 检查是否匹配（简单IoU匹配）
+                            if (
+                                abs(bbox[0] - x1) < 5
+                                and abs(bbox[1] - y1) < 5
+                                and abs(bbox[2] - x2) < 5
+                                and abs(bbox[3] - y2) < 5
+                            ):
+                                vehicle_info = v
+                                break
+
+                        if vehicle_info:
+                            tracks_dict[track_id] = {
+                                "bbox": [x1, y1, x2, y2],
+                                "class": vehicle_info["class"],
+                                "confidence": vehicle_info["confidence"],
+                                "trajectory": [],  # 简化处理
+                                "violation_frames": [],
+                                "violation_flag": False,
+                                "entry_time": None,
+                                "exit_time": None,
+                                "disappeared": 0,
+                            }
 
                 # 检查违规
-                violations = self.check_violations(vehicles, traffic_lights)
+                violations = self.check_violations_with_sort(
+                    tracks_dict, traffic_lights
+                )
 
                 # 记录违规
                 for violation in violations:
@@ -691,15 +959,17 @@ class TrafficViolationDetector:
                         f"\n⚠️  闯红灯违规! ID: {violation['object_id']}, 车型: {violation['vehicle_class']}"
                     )
 
-                # 绘制跟踪轨迹（持续标注所有违规对象）
+                # 绘制跟踪结果（显示所有跟踪对象）
                 # 获取所有曾经违规的对象ID
                 all_violation_ids = [v["object_id"] for v in self.violations]
                 # 也包括当前帧新检测到的违规
                 current_violation_ids = [v["object_id"] for v in violations]
                 all_violation_ids.extend(current_violation_ids)
 
-                # 绘制所有违规对象
-                frame = self.tracker.draw_tracks(frame, violation_ids=all_violation_ids)
+                # 绘制所有跟踪对象（基于 Sort 输出）
+                frame = self.draw_tracks_with_sort(
+                    frame, tracked_objects, all_violation_ids, vehicles
+                )
 
                 # 绘制UI
                 frame = self.draw_ui(frame, vehicles, traffic_lights, violations)

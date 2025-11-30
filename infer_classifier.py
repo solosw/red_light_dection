@@ -110,33 +110,3 @@ class TrafficLightPredictor:
             },
         }
 
-
-if __name__ == "__main__":
-    model_path = "models/traffic_light_classifier.pth"
-    if not os.path.exists(model_path):
-        print(f"模型文件不存在: {model_path}")
-        print("请先运行训练: python train_classifier.py")
-    else:
-        predictor = TrafficLightPredictor()
-
-        import glob
-
-        test_images = []
-        for color in ["red", "green", "yellow"]:
-            test_dir = f"traffic_light_images/test/{color}"
-            if os.path.exists(test_dir):
-                images = glob.glob(f"{test_dir}/*.jpg")[:2]
-                test_images.extend(images)
-
-        if test_images:
-            print("测试预测功能...")
-            for img_path in test_images:
-                result = predictor.predict_single(img_path)
-                actual_color = img_path.split("/")[-2]
-                status = "✓" if result["class"] == actual_color else "✗"
-                print(
-                    f"{status} {os.path.basename(img_path)}: "
-                    f"预测={result['class']} "
-                    f"(实际={actual_color}) "
-                    f"置信度={result['confidence']:.1f}%"
-                )

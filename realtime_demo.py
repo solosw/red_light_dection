@@ -6,6 +6,7 @@
 import argparse
 import os
 import sys
+import time
 
 
 def print_banner():
@@ -91,7 +92,9 @@ def check_dependencies():
     return True
 
 
-def run_realtime_detection(input_video="input.mp4", detection_zone=None):
+def run_realtime_detection(
+    input_video="input.mp4", detection_zone=None, polygon_points=None
+):
     """运行实时检测"""
     print("\n" + "=" * 60)
     print("启动实时监控模式...")
@@ -104,6 +107,7 @@ def run_realtime_detection(input_video="input.mp4", detection_zone=None):
         yolo_model_path="yolov8s.pt",
         classifier_model_path="models/traffic_light_classifier.pth",
         detection_zone=detection_zone,
+        polygon_points=polygon_points,
         realtime_display=True,
         window_name="🚦 闯红灯检测系统 - 实时监控",
     )
@@ -127,9 +131,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  python realtime_demo.py                    # 使用默认 input.mp4
-  python realtime_demo.py -i my_video.mp4   # 使用指定视频文件
-  python realtime_demo.py --zone 300 200 700 600  # 自定义检测区域 (x1 y1 x2 y2)
+  python realtime_demo.py                          # 必须输入4个点坐标
+  python realtime_demo.py -i my_video.mp4         # 使用指定视频文件
+  python realtime_demo.py --points 300 200 700 600 100 200 500 600  # 直接指定4个点
+  python realtime_demo.py --zone 300 200 700 600   # 使用矩形检测区域
 
 快捷键说明:
   空格键: 暂停/继续播放
@@ -137,6 +142,12 @@ def main():
   s:     保存当前帧截图
   q:     退出程序
   ESC:   退出程序
+
+4点坐标输入说明:
+  • 按顺时针或逆时针顺序输入4个点
+  • 每个点用 x y 格式输入
+  • 4个点将围成一个多边形检测区域
+  • 示例: (300,200) (700,200) (700,600) (300,600) 构成一个矩形
         """,
     )
     parser.add_argument(
@@ -153,17 +164,85 @@ def main():
         help="检测区域坐标 (x1 y1 x2 y2)，只有在此区域内的行人才会被判定为闯红灯",
     )
     parser.add_argument(
+        "--points",
+        nargs=8,
+        type=int,
+        metavar=("P1X", "P1Y", "P2X", "P2Y", "P3X", "P3Y", "P4X", "P4Y"),
+        help="自定义多边形检测区域坐标，输入4个点 (x1 y1 x2 y2 x3 y3 x4 y4)",
+    )
+    parser.add_argument(
         "--skip-deps-check",
         action="store_true",
         help="跳过依赖检查（不推荐）",
     )
     args = parser.parse_args()
 
-    # 处理检测区域参数
+    # 处理检测区域参数 - 4点坐标输入是必选项
     detection_zone = None
-    if args.zone:
-        detection_zone = tuple(args.zone)
-        print(f"\n✓ 使用自定义检测区域: {detection_zone}")
+    polygon_points = None
+
+    if args.points:
+        # 使用命令行指定的4点定义多边形区域
+        polygon_points = args.points
+        print(f"\n✓ 使用命令行指定的4点检测区域")
+        print(f"  4个点坐标: {polygon_points}")
+    elif args.zone:
+        # 使用命令行指定的矩形区域 (转换为4点)
+        zone = args.zone
+        x1, y1, x2, y2 = zone
+        polygon_points = [x1, y1, x2, y1, x2, y2, x1, y2]  # 4个点构成矩形
+        print(f"\n✓ 使用矩形区域，转换为4点: {polygon_points}")
+    else:
+        # 交互式要求用户输入4个点坐标
+        print("\n" + "=" * 80)
+        print("🎯 请输入4个点坐标定义检测区域")
+        print("=" * 80)
+        print("说明:")
+        print("  • 按顺时针或逆时针顺序输入4个点")
+        print("  • 每个点用 'x y' 格式输入（用空格分隔）")
+        print("  • 4个点将围成一个多边形检测区域")
+        print("\n示例:")
+        print("  请输入第1个点: 300 200")
+        print("  请输入第2个点: 700 200")
+        print("  请输入第3个点: 700 600")
+        print("  请输入第4个点: 300 600")
+        print("\n" + "=" * 80)
+
+        polygon_points = []
+        point_names = ["第1个点", "第2个点", "第3个点", "第4个点"]
+
+        for i, name in enumerate(point_names):
+            while True:
+                try:
+                    coords = input(f"\n请输入{name}坐标 (x y): ").strip().split()
+                    if len(coords) != 2:
+                        print("  ⚠️ 错误：请输入两个数字，用空格分隔，如 '300 200'")
+                        continue
+                    x, y = int(coords[0]), int(coords[1])
+                    polygon_points.extend([x, y])
+                    print(f"  ✓ 已记录{name}: ({x}, {y})")
+                    break
+                except ValueError:
+                    print("  ⚠️ 错误：请输入有效的数字")
+                except KeyboardInterrupt:
+                    print("\n\n⚠️ 用户取消输入")
+                    sys.exit(1)
+
+        print("\n✓ 4个点坐标输入完成！")
+        print(f"  坐标列表: {polygon_points}")
+
+    # 保存多边形点到文件
+    import json
+    import os
+
+    zone_config = {
+        "polygon_points": polygon_points,
+        "input_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    os.makedirs("configs", exist_ok=True)
+    with open("configs/detection_zone.json", "w") as f:
+        json.dump(zone_config, f, indent=2)
+    print(f"\n✓ 检测区域配置已保存到: configs/detection_zone.json")
 
     # 打印欢迎横幅
     print_banner()
@@ -187,7 +266,7 @@ def main():
     print("⚠️  使用 Ctrl+C 可以强制退出")
     print("=" * 80)
 
-    success = run_realtime_detection(args.input, detection_zone)
+    success = run_realtime_detection(args.input, detection_zone, polygon_points)
 
     if success:
         print("\n" + "=" * 60)
